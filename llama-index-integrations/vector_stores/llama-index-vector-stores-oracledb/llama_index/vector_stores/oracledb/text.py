@@ -43,8 +43,8 @@ from llama_index.vector_stores.oracledb.base import (
     _get_connection,
     _handle_exceptions,
     _index_exists,
+    _quote_identifier,
 )
-from llama_index.vector_stores.oracledb.hybrid import _validate_identifier
 
 if TYPE_CHECKING:
     from oracledb import (
@@ -78,7 +78,8 @@ def _get_text_index_ddl(
             resolves to a valid target; also for invalid column choices.
 
     """
-    table_name = vector_store.table_name
+    idx_name = _quote_identifier(idx_name)
+    table_name = vector_store._quoted_table_name
     col = "text"
 
     return f"CREATE SEARCH INDEX {idx_name} ON {table_name}({col})"
@@ -108,7 +109,6 @@ def create_text_index(
         RuntimeError/ValueError: on DB/validation errors.
 
     """
-    _validate_identifier(idx_name)
     ddl = _get_text_index_ddl(idx_name, vector_store)
 
     with _get_connection(client) as connection:

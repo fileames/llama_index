@@ -1,40 +1,25 @@
+import os
+import threading
 import unittest
 from typing import List
 
-import pytest
-import threading
-
-from llama_index.core.schema import (
-    NodeRelationship,
-    RelatedNodeInfo,
-    TextNode,
-)
-from llama_index.core.vector_stores.types import (
-    ExactMatchFilter,
-    MetadataFilters,
-    VectorStoreQuery,
-    FilterCondition,
-    MetadataFilter,
-    FilterOperator,
-)
-
-from llama_index.vector_stores.oracledb import OraLlamaVS
-from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, TextNode
-from llama_index.core.vector_stores.types import (
-    ExactMatchFilter,
-    MetadataFilters,
-    VectorStoreQuery,
-    MetadataFilter,
-    FilterOperator,
-)
-from llama_index.vector_stores.oracledb import base as orallamavs
-from llama_index.vector_stores.oracledb import OraLlamaVS
-from llama_index.core.vector_stores import FilterOperator, FilterCondition
 import oracledb
+import pytest
 
-username = ""
-password = ""
-dsn = ""
+from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, TextNode
+from llama_index.core.vector_stores import FilterCondition, FilterOperator
+from llama_index.core.vector_stores.types import (
+    ExactMatchFilter,
+    MetadataFilter,
+    MetadataFilters,
+    VectorStoreQuery,
+)
+from llama_index.vector_stores.oracledb import OraLlamaVS
+from llama_index.vector_stores.oracledb import base as orallamavs
+
+username = os.environ.get("VECDB_USER")
+password = os.environ.get("VECDB_PASS")
+dsn = os.environ.get("VECDB_HOST")
 
 connection = oracledb.create_pool(user=username, password=password, dsn=dsn, max=4)
 

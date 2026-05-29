@@ -127,6 +127,67 @@ def _escape_str(value: str) -> str:
     )
 
 
+_IDENTIFIER_RE = re.compile(r'^(?:"[^"]+"|[^".]+)(?:\.(?:"[^"]+"|[^".]+))*$')
+_IDENTIFIER_PART_RE = re.compile(r'"([^"]+)"|([^".]+)')
+
+
+def _quote_identifier(name: str) -> str:
+    parts = _identifier_parts(name)
+    return ".".join(f'"{part}"' for part in parts)
+
+
+def _identifier_parts(name: str) -> list[str]:
+    if not isinstance(name, str):
+        raise ValueError("Identifier name must be a string.")
+
+    name = name.strip()
+    if not name:
+        raise ValueError("Identifier name must not be empty.")
+    if not _IDENTIFIER_RE.match(name):
+        raise ValueError(f"Identifier name {name} is not valid.")
+
+    groups = _IDENTIFIER_PART_RE.findall(name)
+    return [quoted or unquoted.upper() for quoted, unquoted in groups]
+
+
+def _identifier_lookup_name(name: str) -> str:
+    return _identifier_parts(name)[-1]
+
+
+def _validate_int_param(
+    config: dict[str, Any],
+    key: str,
+    min_value: int,
+    max_value: Optional[int] = None,
+) -> None:
+    if key not in config:
+        return
+
+    value = config[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer.")
+    if value < min_value:
+        raise ValueError(f"{key} must be at least {min_value}.")
+    if max_value is not None and value > max_value:
+        raise ValueError(f"{key} must be at most {max_value}.")
+
+
+def _validate_index_type(config: dict[str, Any], expected_type: str) -> None:
+    if "idx_type" not in config:
+        return
+
+    idx_type = config["idx_type"]
+    if not isinstance(idx_type, str) or idx_type.upper() != expected_type:
+        raise ValueError(f"idx_type must be {expected_type}.")
+    config["idx_type"] = expected_type
+
+
+def _validate_vector_index_common(config: dict[str, Any]) -> None:
+    config["idx_name"] = _quote_identifier(config["idx_name"])
+    _validate_int_param(config, "accuracy", 1, 100)
+    _validate_int_param(config, "parallel", 1)
+
+
 column_config: Dict = {
     "id": {"type": "VARCHAR2(64) PRIMARY KEY", "extract_func": lambda x: x.node_id},
     "doc_id": {"type": "VARCHAR2(64)", "extract_func": lambda x: x.ref_doc_id},
@@ -159,6 +220,7 @@ def _table_exists(connection: Connection, table_name: str) -> bool:
             "Unable to import oracledb, please install with `pip install -U oracledb`."
         ) from e
     try:
+        table_name = _quote_identifier(table_name)
         with connection.cursor() as cursor:
             cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
             return True
@@ -172,13 +234,19 @@ def _table_exists(connection: Connection, table_name: str) -> bool:
 @_handle_exceptions
 def _index_exists(connection: Connection, index_name: str) -> bool:
     # Check if the index exists
-    query = (
-        "SELECT index_name FROM all_indexes WHERE upper(index_name) = upper(:idx_name)"
-    )
+    parts = _identifier_parts(index_name)
+    if len(parts) > 2:
+        raise ValueError("Index name must be unqualified or schema-qualified.")
+
+    query = "SELECT index_name FROM all_indexes WHERE index_name = :idx_name"
+    params = {"idx_name": parts[-1]}
+    if len(parts) == 2:
+        query += " AND owner = :owner"
+        params["owner"] = parts[0]
 
     with connection.cursor() as cursor:
         # Execute the query
-        cursor.execute(query, idx_name=index_name.upper())
+        cursor.execute(query, **params)
         result = cursor.fetchone()
 
     # Check if the index exists
@@ -211,6 +279,7 @@ def _get_index_name(base_name: str) -> str:
 
 @_handle_exceptions
 def _create_table(connection: Connection, table_name: str) -> None:
+    table_name = _quote_identifier(table_name)
     if not _table_exists(connection, table_name):
         with connection.cursor() as cursor:
             column_definitions = ", ".join(
@@ -234,14 +303,22 @@ def create_index(
 ) -> None:
     with _get_connection(client) as connection:
         if params:
-            if params["idx_type"] == "HNSW":
+            params = params.copy()
+            if "idx_name" in params:
+                params["idx_name"] = _quote_identifier(params["idx_name"])
+            idx_type = params.get("idx_type", "HNSW")
+            if not isinstance(idx_type, str):
+                raise ValueError("idx_type must be a string.")
+            idx_type = idx_type.upper()
+            params["idx_type"] = idx_type
+            if idx_type == "HNSW":
                 _create_hnsw_index(
                     connection,
                     vector_store.table_name,
                     vector_store.distance_strategy,
                     params,
                 )
-            elif params["idx_type"] == "IVF":
+            elif idx_type == "IVF":
                 _create_ivf_index(
                     connection,
                     vector_store.table_name,
@@ -275,7 +352,7 @@ def _create_config(defaults: dict, params: Optional[dict]) -> dict:
             if key not in defaults:
                 raise ValueError(f"Invalid parameter: {key}")
     else:
-        config = defaults
+        config = defaults.copy()
     return config
 
 
@@ -286,6 +363,7 @@ def _create_hnsw_index(
     distance_strategy: DistanceStrategy,
     params: Optional[dict[str, Any]] = None,
 ) -> None:
+    table_name = _quote_identifier(table_name)
     defaults = {
         "idx_name": "HNSW",
         "idx_type": "HNSW",
@@ -296,6 +374,14 @@ def _create_hnsw_index(
     }
 
     config = _create_config(defaults, params)
+    if (
+        "neighbors" in config or "efConstruction" in config
+    ) and "idx_type" not in config:
+        config["idx_type"] = defaults["idx_type"]
+    _validate_index_type(config, "HNSW")
+    _validate_int_param(config, "neighbors", 2, 2048)
+    _validate_int_param(config, "efConstruction", 1, 65535)
+    _validate_vector_index_common(config)
 
     # Base SQL statement
     idx_name = config["idx_name"]
@@ -341,6 +427,7 @@ def _create_ivf_index(
     distance_strategy: DistanceStrategy,
     params: Optional[dict[str, Any]] = None,
 ) -> None:
+    table_name = _quote_identifier(table_name)
     # Default configuration
     defaults = {
         "idx_name": "IVF",
@@ -351,6 +438,11 @@ def _create_ivf_index(
     }
 
     config = _create_config(defaults, params)
+    if "neighbor_part" in config and "idx_type" not in config:
+        config["idx_type"] = defaults["idx_type"]
+    _validate_index_type(config, "IVF")
+    _validate_int_param(config, "neighbor_part", 1, 10000000)
+    _validate_vector_index_common(config)
 
     # Base SQL statement
     idx_name = config["idx_name"]
@@ -385,6 +477,7 @@ def _create_ivf_index(
 
 @_handle_exceptions
 def drop_table_purge(client: Any, table_name: str) -> None:
+    table_name = _quote_identifier(table_name)
     with _get_connection(client) as connection:
         if _table_exists(connection, table_name):
             cursor = connection.cursor()
@@ -398,6 +491,7 @@ def drop_table_purge(client: Any, table_name: str) -> None:
 
 @_handle_exceptions
 def drop_index_if_exists(connection: Connection, index_name: str) -> None:
+    index_name = _quote_identifier(index_name)
     if _index_exists(connection, index_name):
         drop_query = f"DROP INDEX {index_name}"
         with connection.cursor() as cursor:
@@ -458,7 +552,7 @@ class OraLlamaVS(BasePydanticVectorStore):
             from llama_index.vector_stores.oracledb import OraLlamaVS, DistanceStrategy
             from llama_index.core.vector_stores.types import VectorStoreQuery, VectorStoreQueryMode
 
-            conn = oracledb.connect(user=user, password=password, dsn=dsn)
+            conn = oracledb.connect(dsn=os.environ["ORACLE_DB_DSN"])
             vs = OraLlamaVS(
                 _client=conn,
                 table_name="llama_index",
@@ -481,6 +575,7 @@ class OraLlamaVS(BasePydanticVectorStore):
     metadata_column: str = "metadata"
     stores_text: bool = True
     _client: Connection = PrivateAttr()
+    _quoted_table_name: str = PrivateAttr()
     table_name: str
     distance_strategy: DistanceStrategy
     batch_size: Optional[int]
@@ -521,7 +616,10 @@ class OraLlamaVS(BasePydanticVectorStore):
             with _get_connection(_client) as connection:
                 # Assign _client to PrivateAttr after the Pydantic initialization
                 object.__setattr__(self, "_client", _client)
-                _create_table(connection, table_name)
+                object.__setattr__(
+                    self, "_quoted_table_name", _quote_identifier(table_name)
+                )
+                _create_table(connection, self._quoted_table_name)
             self.hybrid_index_name = hybrid_index_name
             self.hybrid_search_params = hybrid_search_params
             self.use_fuzzy_text_search = use_fuzzy_text_search
@@ -727,7 +825,7 @@ class OraLlamaVS(BasePydanticVectorStore):
             _data.append(item_values)
 
         dml = f"""
-           INSERT INTO {self.table_name} ({", ".join(column_config.keys())})
+           INSERT INTO {self._quoted_table_name} ({", ".join(column_config.keys())})
            VALUES ({", ".join([":" + str(i + 1) for i in range(len(column_config))])})
         """
         return dml, _data
@@ -744,7 +842,7 @@ class OraLlamaVS(BasePydanticVectorStore):
                 node_info,
                 metadata,
                 vector_distance(embedding, :embedding, {distance_function}) AS distance
-            FROM {self.table_name}
+            FROM {self._quoted_table_name}
             {where_clause}
             ORDER BY distance
             FETCH APPROX FIRST {k} ROWS ONLY
@@ -772,7 +870,7 @@ class OraLlamaVS(BasePydanticVectorStore):
 
         if not self.hybrid_index_name:
             raise ValueError("Need to set `hybrid_index_name`")
-        search_params["hybrid_index_name"] = self.hybrid_index_name
+        search_params["hybrid_index_name"] = _quote_identifier(self.hybrid_index_name)
 
         if "search_text" in search_params:
             raise ValueError(
@@ -843,7 +941,9 @@ class OraLlamaVS(BasePydanticVectorStore):
     def delete(self, ref_doc_id: str, **kwargs: Any) -> None:
         with _get_connection(self._client) as connection:
             with connection.cursor() as cursor:
-                ddl = f"DELETE FROM {self.table_name} WHERE doc_id = :ref_doc_id"
+                ddl = (
+                    f"DELETE FROM {self._quoted_table_name} WHERE doc_id = :ref_doc_id"
+                )
                 cursor.execute(ddl, [ref_doc_id])
                 connection.commit()
 
@@ -907,7 +1007,7 @@ class OraLlamaVS(BasePydanticVectorStore):
         return query_sql, params
 
     def _get_hybrid_query(self, query: VectorStoreQuery) -> Tuple[str, Dict[str, Any]]:
-        SQL_QUERY = "SELECT DBMS_HYBRID_VECTOR.SEARCH(:search_params)"
+        SQL_QUERY = "SELECT DBMS_HYBRID_VECTOR.SEARCH(json(:search_params))"
 
         json_filter = {}
         if query.doc_ids:
@@ -963,7 +1063,7 @@ class OraLlamaVS(BasePydanticVectorStore):
                 node_info,
                 metadata,
                 SCORE(1) score
-        FROM {self.table_name}
+        FROM {self._quoted_table_name}
         WHERE CONTAINS(text, :query, 1) > 0
         {"AND " + where_str if where_str else ""}
         ORDER BY score DESC FETCH FIRST {k} ROWS ONLY
@@ -989,7 +1089,8 @@ class OraLlamaVS(BasePydanticVectorStore):
                 for i, rid_tuple in enumerate(rowids):
                     rid = rid_tuple[0]
                     cursor.execute(
-                        f"SELECT id, doc_id, text, node_info, metadata FROM {self.table_name} "
+                        "SELECT id, doc_id, text, node_info, metadata "
+                        f"FROM {self._quoted_table_name} "
                         "WHERE rowid = :1",
                         [rid],
                     )

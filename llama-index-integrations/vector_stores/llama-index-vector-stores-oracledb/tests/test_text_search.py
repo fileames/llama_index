@@ -31,10 +31,10 @@ def _env_or_default(name: str, default: str) -> str:
 def _connect_or_skip() -> Any:
     if oracledb is None:
         pytest.skip("oracledb client not installed")
-    username = _env_or_default("ORACLE_USERNAME", "")
-    password = _env_or_default("ORACLE_PASSWORD", "")
+    username = _env_or_default("VECDB_USER", "")
+    password = _env_or_default("VECDB_PASS", "")
     dsn = _env_or_default(
-        "ORACLE_DSN",
+        "VECDB_HOST",
         "",
     )
     try:

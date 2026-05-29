@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
-import re
 
 from llama_index.embeddings.oracleai import OracleEmbeddings
 from llama_index.vector_stores.oracledb import OraLlamaVS
@@ -33,6 +33,7 @@ from llama_index.vector_stores.oracledb.base import (
     _get_connection,
     _handle_exceptions,
     _index_exists,
+    _quote_identifier,
 )
 
 if TYPE_CHECKING:
@@ -43,6 +44,35 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _quote_filter_order_identifier(value: str, field_name: str) -> str:
+    value = value.strip()
+    simple_identifier = r"[A-Za-z][A-Za-z0-9_$#]*"
+    reg = (
+        rf'^(?:"{simple_identifier}"|{simple_identifier})'
+        rf'(?:\.(?:"{simple_identifier}"|{simple_identifier}))*$'
+    )
+    if not re.fullmatch(reg, value):
+        raise ValueError(f"{field_name} contains an invalid identifier")
+
+    pattern_match = rf'"({simple_identifier})"|({simple_identifier})'
+    groups = re.findall(pattern_match, value)
+    quoted_groups = [
+        f'"{quoted}"' if quoted else f'"{unquoted.upper()}"'
+        for quoted, unquoted in groups
+    ]
+    return ".".join(quoted_groups)
+
+
+def _quote_identifier_list(values: Any, field_name: str) -> str:
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"{field_name} must be a list of column names")
+    if not all(isinstance(value, str) for value in values):
+        raise ValueError(f"{field_name} must contain only column names")
+    return ",".join(
+        _quote_filter_order_identifier(value, field_name) for value in values
+    )
 
 
 def _validate_parameters(
@@ -249,38 +279,50 @@ def _get_hybrid_index_ddl(
     Reference: https://docs.oracle.com/en/database/oracle/oracle-database/26/vecse/create-hybrid-vector-index.html
 
     """
-    index_parameters = params.get("parameters", {}).copy()
-    if any(
-        key.lower() in ["model", "embedder_spec", "vector_idxtype", "vectorizer"]
-        for key in index_parameters
-    ):
-        raise ValueError(
-            "Vectorization parameters must be given with OracleVectorizerPreference: "
-            "do not include any of {model, embedder_spec, vector_idxtype, vectorizer} "
-            "under params['parameters']."
-        )
+    idx_name = _quote_identifier(idx_name)
+    table_name = _quote_identifier(table_name)
+    index_parameters = {}
+    reserved_parameters = ["model", "embedder_spec", "vector_idxtype", "vectorizer"]
+    for key, value in params.get("parameters", {}).items():
+        _validate_identifier(key)
+        normalized_key = key.strip()
+        if normalized_key.lower() in reserved_parameters:
+            raise ValueError(
+                "Vectorization parameters must be given with OracleVectorizerPreference: "
+                "do not include any of {model, embedder_spec, vector_idxtype, vectorizer} "
+                "under params['parameters']."
+            )
+        index_parameters[normalized_key] = value
 
     params_str, filter_by_str, order_by_str, parallel_str = "", "", "", ""
 
     params_str = f"vectorizer {vectorizer_preference.preference_name} "
     for k, v in index_parameters.items():
+        # Keys and values are trusted Oracle hybrid-vector parameter grammar
+        # inside an escaped SQL string literal, not outer SQL syntax.
         params_str += f"{k} {v} "
 
     filter_by = params.get("filter_by")
     if filter_by:
-        filter_by_str = "FILTER BY " + ",".join(filter_by) + " "
+        filter_by_str = (
+            "FILTER BY " + _quote_identifier_list(filter_by, "filter_by") + " "
+        )
 
     order_by = params.get("order_by")
     order_by_asc = params.get("order_by_asc", True)
+    if not isinstance(order_by_asc, bool):
+        raise ValueError("order_by_asc must be a boolean")
     if order_by:
         order_by_str = (
-            "ORDER BY " + ",".join(order_by) + f" {'ASC' if order_by_asc else 'DESC'} "
+            "ORDER BY "
+            + _quote_identifier_list(order_by, "order_by")
+            + f" {'ASC' if order_by_asc else 'DESC'} "
         )
 
     parallel = params.get("parallel")
-    if parallel:
-        if not isinstance(parallel, int):
-            raise ValueError("parallel must be int")
+    if parallel is not None:
+        if isinstance(parallel, bool) or not isinstance(parallel, int) or parallel <= 0:
+            raise ValueError("parallel must be a positive integer")
         parallel_str = f"PARALLEL {parallel} "
 
     def oracle_string_literal(value: str) -> str:
@@ -294,12 +336,7 @@ def _get_hybrid_index_ddl(
 
 
 def _validate_identifier(name: str) -> None:
-    name = name.strip()
-    reg = r'^(?:"[^"]+"|[^".]+)(?:\.(?:"[^"]+"|[^".]+))*$'
-    pattern_validate = re.compile(reg)
-
-    if not pattern_validate.match(name):
-        raise ValueError(f"Identifier name {name} is not valid.")
+    _quote_identifier(name)
 
 
 @_handle_exceptions

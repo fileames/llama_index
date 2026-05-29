@@ -20,7 +20,10 @@ from llama_index.core.vector_stores import (
     FilterOperator,
 )
 from llama_index.vector_stores.oracledb import OraLlamaVS, DistanceStrategy
-from llama_index.vector_stores.oracledb.hybrid import create_hybrid_index
+from llama_index.vector_stores.oracledb.hybrid import (
+    OracleVectorizerPreference,
+    create_hybrid_index,
+)
 from llama_index.embeddings.oracleai import OracleEmbeddings
 
 
@@ -32,11 +35,11 @@ def _env_or_default(name: str, default: str) -> str:
 def _connect_or_skip():
     if oracledb is None:
         pytest.skip("oracledb client not installed")
-    # Reuse defaults from existing tests, overridable via env
-    username = _env_or_default("ORACLE_USERNAME", "")
-    password = _env_or_default("ORACLE_PASSWORD", "")
+    # Reuse the same VECDB_* names as the rest of this test package.
+    username = _env_or_default("VECDB_USER", "")
+    password = _env_or_default("VECDB_PASS", "")
     dsn = _env_or_default(
-        "ORACLE_DSN",
+        "VECDB_HOST",
         "",
     )
     try:
@@ -141,6 +144,24 @@ def _prep_nodes():
     return nodes
 
 
+def _create_hybrid_index(conn, vs: OraLlamaVS, embeddings: OracleEmbeddings) -> str:
+    idx_name = f"HYB_{uuid.uuid4().hex[:8]}"
+    preference = OracleVectorizerPreference.create_preference(
+        conn,
+        embeddings,
+        f"PREF_{uuid.uuid4().hex[:8]}",
+    )
+    create_hybrid_index(
+        client=conn,
+        idx_name=idx_name,
+        vector_store=vs,
+        vectorizer_preference=preference,
+        params={},
+    )
+    vs.set_hybrid_index(idx_name)
+    return idx_name
+
+
 def _setup_vs_and_index(conn, embed_params) -> OraLlamaVS:
     table_name = f"LLM_IDX_{uuid.uuid4().hex[:8]}"
     vs = OraLlamaVS.from_documents(
@@ -150,15 +171,7 @@ def _setup_vs_and_index(conn, embed_params) -> OraLlamaVS:
         distance_strategy=DistanceStrategy.DOT_PRODUCT,
     )
     embeddings = OracleEmbeddings(conn=conn, params=embed_params)
-    idx_name = f"HYB_{uuid.uuid4().hex[:8]}"
-    create_hybrid_index(
-        client=conn,
-        idx_name=idx_name,
-        vector_store=vs,
-        embeddings=embeddings,
-        params={},
-    )
-    vs.set_hybrid_index(idx_name)
+    _create_hybrid_index(conn, vs, embeddings)
     return vs
 
 
@@ -177,15 +190,7 @@ def test_hybrid_basic_search():
 
     # Create a hybrid vector index using OracleEmbeddings
     embeddings = OracleEmbeddings(conn=conn, params=embed_params)
-    idx_name = f"HYB_{uuid.uuid4().hex[:8]}"
-    create_hybrid_index(
-        client=conn,
-        idx_name=idx_name,
-        vector_store=vs,
-        embeddings=embeddings,
-        params={},  # allow DB defaults
-    )
-    vs.set_hybrid_index(idx_name)
+    _create_hybrid_index(conn, vs, embeddings)
 
     # Optionally allow additional search params via env
     extra_params_raw = os.getenv("ORACLE_HYBRID_SEARCH_PARAMS")
@@ -226,15 +231,7 @@ def test_hybrid_with_metadata_filters():
     )
 
     embeddings = OracleEmbeddings(conn=conn, params=embed_params)
-    idx_name = f"HYB_{uuid.uuid4().hex[:8]}"
-    create_hybrid_index(
-        client=conn,
-        idx_name=idx_name,
-        vector_store=vs,
-        embeddings=embeddings,
-        params={},
-    )
-    vs.set_hybrid_index(idx_name)
+    _create_hybrid_index(conn, vs, embeddings)
 
     # Filter: rank IN ["c"] AND url TEXT_MATCH "docs.oracle"
     filters = MetadataFilters(
@@ -278,15 +275,7 @@ def test_hybrid_with_doc_id_filtering():
     )
 
     embeddings = OracleEmbeddings(conn=conn, params=embed_params)
-    idx_name = f"HYB_{uuid.uuid4().hex[:8]}"
-    create_hybrid_index(
-        client=conn,
-        idx_name=idx_name,
-        vector_store=vs,
-        embeddings=embeddings,
-        params={},
-    )
-    vs.set_hybrid_index(idx_name)
+    _create_hybrid_index(conn, vs, embeddings)
 
     # Restrict to a specific doc_id (from relationships 'test-1')
     q = VectorStoreQuery(
