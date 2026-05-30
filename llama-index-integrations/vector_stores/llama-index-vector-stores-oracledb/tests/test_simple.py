@@ -30,8 +30,12 @@ _NODE_ID_WEIGHT_3_RANK_C = "452D24AB-F185-414C-A352-590B4B9EE51B"
 
 @pytest.fixture(autouse=True)
 def drop_table():
+    # The store creates the table in the connecting user's schema, so clean it
+    # up there (unqualified) rather than in a hardcoded foreign schema. Drop both
+    # before and after each test so a leftover from a crashed run can't poison the suite.
+    orallamavs.drop_table_purge(connection, "TABLEHELLO")
     yield
-    orallamavs.drop_table_purge(connection, "ONNXUSER.TABLEHELLO")
+    orallamavs.drop_table_purge(connection, "TABLEHELLO")
 
 
 def _node_embeddings_for_test() -> List[TextNode]:

@@ -51,8 +51,14 @@ def _connect_or_skip():
 def _load_embed_params_or_skip():
     # Expect JSON in ORACLE_EMBED_PARAMS, e.g.:
     #   {"provider": "database", "model": "MINI_LM_L6_V2"}
-    # or an external embedder spec supported by DBMS_VECTOR_CHAIN
-    return {"provider": "database", "model": "allminilm"}
+    # or an external embedder spec supported by DBMS_VECTOR_CHAIN.
+    # Fall back to the in-database ONNX model name (override via
+    # ORACLE_EMBEDDING_MODEL), consistent with the other VECDB_* env vars.
+    raw = os.getenv("ORACLE_EMBED_PARAMS")
+    if raw:
+        return json.loads(raw)
+    model = _env_or_default("ORACLE_EMBEDDING_MODEL", "ALL_MINILM_L12_V2")
+    return {"provider": "database", "model": model}
 
 
 def _prep_nodes():
